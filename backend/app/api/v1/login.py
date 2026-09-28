@@ -99,25 +99,22 @@ async def login(request: LoginRequest):
                 }
             )
         
-        # For other users, check if they exist in the database
-        # This is a simplified auth - in production you'd check password hashes
+        # Other accounts require password verification by a configured auth server.
+        if not settings.supabase_url or not settings.supabase_service_role_key:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
         try:
-            # Check if user exists in Supabase auth
-            user_result = supabase.auth.admin.list_users()
-            users = user_result if hasattr(user_result, '__iter__') else []
-            
-            user = None
-            for u in users:
-                if u.email and u.email.lower() == email:
-                    user = u
-                    break
-                    
-            if not user:
-                logger.warning(f"[LOGIN] User not found: {email}")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid credentials"
-                )
+            auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        except Exception as auth_error:
+            logger.warning(f"[LOGIN] Password verification failed: {type(auth_error).__name__}")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        user = auth_response.user
+        session = auth_response.session
+        if not user or not session:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        try:
             
             # Get user permissions
             permissions_response = (
@@ -144,24 +141,18 @@ async def login(request: LoginRequest):
             )
             
             # Resolve tenant ID
-            tenant_id = await TenantResolver.resolve_tenant_id(user_id=user.id, user_email=user.email)
-            
-            # Create JWT token
-            user_data = {
-                "id": user.id,
-                "email": user.email,
-                "is_admin": is_admin,
-                "tenant_id": tenant_id,
-                "exp": datetime.utcnow() + timedelta(hours=24),
-                "aud": "authenticated"
-            }
-            
-            token = jwt.encode(user_data, settings.secret_key, algorithm="HS256")
+            tenant_id = await TenantResolver.resolve_tenant_id(
+                user_id=user.id,
+                user_email=user.email,
+                verified_payload={"app_metadata": user.app_metadata},
+            )
+            if not tenant_id:
+                raise HTTPException(status_code=403, detail="Authenticated user has no valid tenant")
             
             logger.info(f"[LOGIN] Success for {email}")
             
             return LoginResponse(
-                access_token=token,
+                access_token=session.access_token,
                 user={
                     "id": user.id,
                     "email": user.email,

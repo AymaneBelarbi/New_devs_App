@@ -83,7 +83,8 @@ async def authenticate_request(
     # Check cache first
     if token_hash in auth_cache:
         cached_data = auth_cache[token_hash]
-        if datetime.now().timestamp() - cached_data["timestamp"] < CACHE_DURATION:
+        now = datetime.now().timestamp()
+        if now - cached_data["timestamp"] < CACHE_DURATION and now < cached_data.get("expires_at", 0):
             cached_user = cached_data["user"]
             # If not, force a refresh to get proper tenant isolation
             if not cached_user.tenant_id:
@@ -111,7 +112,8 @@ async def authenticate_request(
                     token, 
                     settings.secret_key, 
                     algorithms=["HS256"],
-                    audience="authenticated"  # Accept tokens with aud: "authenticated"
+                    audience="authenticated",  # Accept tokens with aud: "authenticated"
+                    options={"require_exp": True},
                 )
                 logger.info(f"AUTH: Successfully decoded custom JWT token for {payload.get('email')}")
                 
@@ -125,11 +127,22 @@ async def authenticate_request(
                         self.raw_app_metadata = payload.get('app_metadata', {})
                         
                 user = MockUser(payload)
+                verified_payload = payload
                 
             except JWTError:
-                # If custom JWT fails, try Supabase auth
+                # A local verification failure must not fall back to a mock user.
+                if not settings.supabase_url or not settings.supabase_service_role_key:
+                    raise HTTPException(status_code=401, detail="Invalid or missing token")
+                # Configured Supabase verifies its own token on the auth server.
                 response = supabase.auth.get_user(token)
                 user = response.user
+                verified_payload = {"app_metadata": getattr(user, "app_metadata", {})}
+                # The server verified the token; read expiry only to bound our cache.
+                payload = jwt.get_unverified_claims(token)
+
+            expires_at = float(payload['exp'])
+            if expires_at <= datetime.now().timestamp():
+                raise HTTPException(status_code=401, detail="Invalid or missing token")
                 
         except Exception as e:
             # Malformed or invalid token (e.g., wrong number of segments)
@@ -253,7 +266,11 @@ async def authenticate_request(
         logger.info(f"User: {user.email} (ID: {user.id})")
 
         # Use TenantResolver for comprehensive tenant resolution
-        tenant_id = await TenantResolver.resolve_tenant_id(token=token, user_id=user.id, user_email=user.email)
+        tenant_id = await TenantResolver.resolve_tenant_id(
+            user_id=user.id, user_email=user.email, verified_payload=verified_payload
+        )
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Authenticated user has no valid tenant")
 
         # If we found a tenant_id and it's not in the user's metadata, update it for next time
         current_tenant_in_metadata = None
@@ -281,6 +298,7 @@ async def authenticate_request(
         auth_cache[token_hash] = {
             "user": auth_user,
             "timestamp": datetime.now().timestamp(),
+            "expires_at": expires_at,
         }
 
         # Clean up old cache entries (keep cache size manageable)
@@ -508,9 +526,20 @@ async def verify_token_ws(token: str) -> Optional[AuthenticatedUser]:
         
         logger.info(f"WS_AUTH: Final user cities after processing: {user_cities}")
 
-        # Use the comprehensive tenant resolver (same as regular auth)
+        # Use local verified claims, or app metadata from Supabase's verified user.
         logger.info(f"WS_AUTH: Resolving tenant for user {user.email}")
-        tenant_id = await TenantResolver.resolve_tenant_id(token=token, user_id=user.id, user_email=user.email)
+        try:
+            verified_payload = jwt.decode(
+                token, settings.secret_key, algorithms=["HS256"],
+                audience="authenticated", options={"require_exp": True},
+            )
+        except JWTError:
+            verified_payload = {"app_metadata": getattr(user, "app_metadata", {})}
+        tenant_id = await TenantResolver.resolve_tenant_id(
+            user_id=user.id, user_email=user.email, verified_payload=verified_payload
+        )
+        if not tenant_id:
+            return None
 
         auth_user = AuthenticatedUser(
             id=user.id,

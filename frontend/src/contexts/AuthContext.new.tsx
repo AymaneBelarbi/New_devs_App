@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { User, Session } from '@supabase/supabase-js';
+import { User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { authOptimizer } from '../utils/authOptimizer';
 import { sessionRecovery } from '../utils/sessionRecovery';
 import { sessionPersistenceManager } from '../utils/SessionPersistenceManager';
 import { extractTenantFromSession } from '../utils/jwtUtils';
+
+type LocalAuthSession = NonNullable<Awaited<ReturnType<typeof supabase.auth.getSession>>['data']['session']>;
 
 // Global logout flag to prevent session recovery during logout
 if (typeof window !== 'undefined') {
@@ -42,30 +44,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   // Helper function to enrich user object with tenant_id from JWT claims and metadata  
-  const enrichUserWithTenant = useCallback((session: Session): EnhancedUser => {
+  const enrichUserWithTenant = useCallback((session: LocalAuthSession): EnhancedUser => {
     const enhancedUser = session.user as EnhancedUser;
 
-    // Extract tenant_id with priority: JWT claims > app_metadata > user_metadata
-    let tenant_id: string | null = null;
-    let source = 'none';
+    // Preserve the tenant returned by the authenticated backend user response.
+    let tenant_id: string | null = enhancedUser.tenant_id || enhancedUser.app_metadata?.tenant_id || null;
+    let source = enhancedUser.tenant_id ? 'authenticated_user' : tenant_id ? 'app_metadata' : 'none';
 
-    // 1. First try JWT claims (added by custom_access_token_hook)
+    // Fall back to JWT claims when the user response has no tenant.
     const jwtTenantId = extractTenantFromSession(session);
-    if (jwtTenantId) {
+    if (!tenant_id && jwtTenantId) {
       tenant_id = jwtTenantId;
       source = 'jwt_claims';
-    }
-
-    // 2. Fallback to app_metadata  
-    if (!tenant_id && enhancedUser.app_metadata?.tenant_id) {
-      tenant_id = enhancedUser.app_metadata.tenant_id;
-      source = 'app_metadata';
-    }
-
-    // 3. Fallback to user_metadata
-    if (!tenant_id && enhancedUser.user_metadata?.tenant_id) {
-      tenant_id = enhancedUser.user_metadata.tenant_id;
-      source = 'user_metadata';
     }
 
     // Add tenant_id as a direct property for backward compatibility
@@ -90,20 +80,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const enrichUserFallback = useCallback((user: User): EnhancedUser => {
     const enhancedUser = user as EnhancedUser;
 
-    // Extract tenant_id from metadata only (no JWT claims available)
-    let tenant_id: string | null = null;
-    let source = 'none';
-
-    // Try app_metadata first
-    if (enhancedUser.app_metadata?.tenant_id) {
-      tenant_id = enhancedUser.app_metadata.tenant_id;
-      source = 'app_metadata';
-    }
-    // Fallback to user_metadata
-    else if (enhancedUser.user_metadata?.tenant_id) {
-      tenant_id = enhancedUser.user_metadata.tenant_id;
-      source = 'user_metadata';
-    }
+    const tenant_id = enhancedUser.tenant_id || enhancedUser.app_metadata?.tenant_id || null;
+    const source = enhancedUser.tenant_id ? 'authenticated_user' : tenant_id ? 'app_metadata' : 'none';
 
     // Add tenant_id as a direct property for backward compatibility
     enhancedUser.tenant_id = tenant_id;
@@ -238,7 +216,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signIn = async (email: string, password: string) => {
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
+      const { session, error } = await supabase.auth.signInWithPassword({
         email,
         password,
       });
@@ -247,11 +225,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { error };
       }
 
-      if (data.session) {
-        const enrichedUser = enrichUserWithTenant(data.session);
+      if (session) {
+        const enrichedUser = enrichUserWithTenant(session);
         setUser(enrichedUser);
         setIsAuthenticated(true);
-        authOptimizer.storeSession(data.session);
+        authOptimizer.storeSession(session);
 
         // Restart session persistence manager after successful login
         sessionPersistenceManager.start();

@@ -43,6 +43,22 @@ export class TenantIsolationError extends Error {
   }
 }
 
+export interface DashboardProperty {
+  id: string;
+  name: string;
+  timezone: string;
+}
+
+export interface DashboardRevenueSummary {
+  property_id: string;
+  total_revenue: string;
+  currency: string | null;
+  reservations_count: number;
+  year: number;
+  month: number;
+  timezone: string;
+}
+
 export class SecureAPIClient {
   private static instance: SecureAPIClient;
   private backendUrl: string;
@@ -1450,22 +1466,23 @@ export class SecureAPIClient {
 
   // ============= DASHBOARD API =============
   /**
-   * Get dashboard summary with optional simulation header
+   * Get properties authorized for the authenticated tenant.
    */
-  async getDashboardSummary(propertyId: string, options?: { simulatedTenant?: string, timestamp?: number }) {
-    const queryParams = new URLSearchParams({ property_id: propertyId });
-    if (options?.timestamp) {
-      queryParams.append('_t', options.timestamp.toString());
-    }
+  async getDashboardProperties() {
+    return this.request<DashboardProperty[]>('/api/v1/dashboard/properties');
+  }
 
-    const requestOptions: RequestInit = {};
-    if (options?.simulatedTenant) {
-      requestOptions.headers = {
-        'X-Simulated-Tenant': options.simulatedTenant
-      };
-    }
+  /**
+   * Get a monthly summary; the backend resolves the tenant from authentication.
+   */
+  async getDashboardSummary(propertyId: string, year: number, month: number) {
+    const queryParams = new URLSearchParams({
+      property_id: propertyId,
+      year: String(year),
+      month: String(month)
+    });
 
-    return this.request<any>(`/api/v1/dashboard/summary?${queryParams}`, requestOptions);
+    return this.request<DashboardRevenueSummary>(`/api/v1/dashboard/summary?${queryParams}`);
   }
 
   async uploadCompanyLogo(logo_url: string) {

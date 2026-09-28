@@ -21,21 +21,14 @@ class TenantResolver:
         Returns:
             Tenant ID if found, None otherwise
         """
-        # Try user_metadata first (most common location)
-        if 'user_metadata' in token_payload:
-            tenant_id = token_payload['user_metadata'].get('tenant_id')
-            if tenant_id:
-                return tenant_id
+        # Authorization uses server-controlled claims, never user_metadata.
+        app_metadata = token_payload.get('app_metadata')
+        if isinstance(app_metadata, dict) and 'tenant_id' in app_metadata:
+            tenant_id = app_metadata['tenant_id']
+        else:
+            tenant_id = token_payload.get('tenant_id')
 
-        # Try app_metadata as fallback
-        if 'app_metadata' in token_payload:
-            tenant_id = token_payload['app_metadata'].get('tenant_id')
-            if tenant_id:
-                return tenant_id
-
-        # Try root level
-        tenant_id = token_payload.get('tenant_id')
-        if tenant_id:
+        if isinstance(tenant_id, str) and tenant_id.strip() and tenant_id == tenant_id.strip():
             return tenant_id
 
         logger.warning("No tenant_id found in token payload")
@@ -52,44 +45,30 @@ class TenantResolver:
         Returns:
             Tenant ID if found, None otherwise
         """
-        # Check various possible locations
-        if 'tenant_id' in user_data:
-            return user_data['tenant_id']
-
-        if 'user_metadata' in user_data:
-            tenant_id = user_data['user_metadata'].get('tenant_id')
-            if tenant_id:
-                return tenant_id
-
-        if 'app_metadata' in user_data:
-            tenant_id = user_data['app_metadata'].get('tenant_id')
-            if tenant_id:
-                return tenant_id
-
-        return None
+        return TenantResolver.resolve_tenant_from_token(user_data)
 
     @staticmethod
-    async def resolve_tenant_id(user_id: str, user_email: str, token: Optional[str] = None) -> str:
+    async def resolve_tenant_id(
+        user_id: str,
+        user_email: str,
+        token: Optional[str] = None,
+        verified_payload: Optional[dict] = None,
+    ) -> Optional[str]:
         """
         Resolve tenant ID for a user.
         
         Args:
             user_id: User ID
             user_email: User email
+            verified_payload: Claims or app metadata from verified authentication
             
         Returns:
             Tenant ID
         """
-        # Fallback mapping by known user email.
-        if user_email == "sunset@propertyflow.com":
-            return "tenant-a"
-        if user_email == "ocean@propertyflow.com":
-            return "tenant-b"
-        if user_email == "candidate@propertyflow.com":
-            return "tenant-a"
-            
-        # Default fallback
-        return "tenant-a"
+        if verified_payload is None:
+            logger.warning("Cannot resolve a tenant without verified authentication claims")
+            return None
+        return TenantResolver.resolve_tenant_from_token(verified_payload)
 
     @staticmethod
     async def update_user_tenant_metadata(user_id: str, tenant_id: str) -> None:
